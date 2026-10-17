@@ -1,0 +1,45 @@
+{
+  "name": "dsh-ui-reload",
+  "version": "0.2.0",
+  "description": "One-click full frontend reload: a button in the conversation session header that reloads the page.",
+  "type": "module",
+  "private": true,
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-slots"
+      ],
+      "platform": "web"
+    },
+    "manifestVersion": 1
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/minhaoli/dsh-ui-reload.git"
+  },
+  "homepage": "https://github.com/minhaoli/dsh-ui-reload#readme",
+  "bugs": {
+    "url": "https://github.com/minhaoli/dsh-ui-reload/issues"
+  },
+  "author": "haomin li",
+  "files": [
+    "lib/**/*.js",
+    "cordis.patch.yml",
+    "README.md",
+    "README.zh.md",
+    "LICENSE"
+  ]
+}

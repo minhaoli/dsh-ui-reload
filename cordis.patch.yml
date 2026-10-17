@@ -1,0 +1,8 @@
+# dsh-ui-reload bundle patch: inserts its plugin row into the web plugin roster.
+# A bundle patch is a single plugin row mounting both halves, so the host side
+# is a no-op entry that exists only to keep the package mountable; the browser
+# side carries the actual behaviour (a full-page reload button in the
+# conversation session header).
+- insert:
+    - id: ui-reload
+      name: 'dsh-ui-reload'
