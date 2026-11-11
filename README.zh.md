@@ -4,11 +4,25 @@
 
 点一下重载整个页面 —— 这是唯一能可靠地把前端各种不一致一次性抹掉的操作：运行中的页面底下被重新构建过的客户端插件 bundle、插件列表变更、过期 CSS，以及 shell 自身的代码。
 
+## 重载前先确认目标页面能启动
+
+插件 bundle 一改，`dsh-client-hmr` 就按磁盘上的字节重算这个 bundle 的 revision 并重新发布。页面手里的文档还带着旧 revision，那些 `plugins/??…&rev=<旧>` 在宿主侧已经取不到；启动器在单插件 bundle 和聚合 bundle 两条路上都失败后直接抛错，应用就停在「无法启动或已意外停止」。
+
+所以按下按钮不再直接 reload：
+
+1. 取一个带唯一 query 的文档地址，读出宿主真正会发回来的那份文档；
+2. 从注入的 `globalThis["__DSH_BOOT__"]` 取出启动图，对其中的每个 bundle 地址发一次 `HEAD`；
+3. 全部可取才导航过去；有一个取不到就等 600 ms 重读文档，最多 8 轮（约 5 秒）。
+
+进不去时不导航：停在当前页面，按钮恢复可用，title 变成「插件还没准备好，稍后再按一次」。文档本身读不到（协议层异常）时退回原来的 reload 行为。
+
+聚合 bundle 有几十 MB，所以校验用 `HEAD` —— 路由只回 immutable 头、不物化正文，不会为了探一次把整包拉下来。
+
 ## 适用版本
 
 | | |
 |---|---|
-| DSH | `0.2.1-rc.2`（开发与验证所用版本） |
+| DSH | `0.2.2-rc.1`（验证所用版本），`0.2.1-rc.2` 亦可用 |
 | `@deepseek-ai/cordis` | `~4.0.5` |
 | 形态 | Web UI（`web` 或 `desktop` profile），没有 CLI 侧 |
 
@@ -44,7 +58,15 @@ DSH 自带 `dsh-client-hmr`，插件 bundle 一变就重新发布。这个按钮
 包里有前后两半，bundle patch 一次挂两边：
 
 - `lib/index.js` —— host 侧。导出空的 `apply()`，不注册任何路由、服务或 watcher，因为整页重载不需要 host 提供什么。它存在的唯一理由是让 bundle 那一行有东西可挂；删掉它整个包就不会被组合，浏览器端的按钮也跟着消失。
-- `lib/client.js` —— 浏览器侧，经 `dsh.client.inject: ["@deepseek-ai/dsh-client-ui-slots"]` 注入。它把按钮注册进 `conversation.session.header.utilities`，点击后先给 400 ms 的点击反馈，再调 `window.location.reload()`。
+- `lib/client.js` —— 浏览器侧，经 `dsh.client.inject: ["@deepseek-ai/dsh-client-ui-slots"]` 注入。它把按钮注册进 `conversation.session.header.utilities`。点击后先校验目标文档的启动图（见上一节），通过则用 `location.replace()` 进入；进不去就停在当前页面，不把应用带进一个起不来的文档。
+
+## 更新日志
+
+### 0.2.1
+
+- 重载前校验目标文档的启动图：bundle revision 与宿主不一致时等待重试，不再直接 reload 进一个起不来的页面
+- 校验始终不通过时不导航，改为在按钮 title 上提示，避免「应用无法启动或已意外停止」
+- 校验用 `HEAD`，不重新拉取几十 MB 的聚合 bundle
 
 ## 配套插件
 
