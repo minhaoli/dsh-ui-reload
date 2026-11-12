@@ -3,7 +3,6 @@
   "version": "0.2.1",
   "description": "One-click full frontend reload: a button in the conversation session header that reloads the page.",
   "type": "module",
-  "private": true,
   "main": "lib/index.js",
   "exports": {
     ".": {
