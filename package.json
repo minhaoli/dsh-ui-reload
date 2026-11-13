@@ -1,6 +1,6 @@
 {
   "name": "dsh-ui-reload",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "One-click full frontend reload: a button in the conversation session header that reloads the page.",
   "type": "module",
   "main": "lib/index.js",

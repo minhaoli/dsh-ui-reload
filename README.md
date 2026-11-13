@@ -2,7 +2,7 @@
 
 A "reload the whole frontend" button in the DSH conversation session header, immediately left of the share button.
 
-Clicking it reloads the entire page — the one operation that reliably picks up anything the frontend can be out of sync with: client plugin bundles rebuilt under the running page, plugin-list changes, stale CSS, and the shell's own code.
+Clicking it reloads what a page on its own cannot reach: first every host plugin whose files changed on disk, then the entire page. That covers client plugin bundles rebuilt under the running page, plugin-list changes, stale CSS and the shell's own code — and, unlike a plain reload, edits to `lib/index.js` or `host/*.js` of a plugin that is already running.
 
 The button and **F5** are the same press. F5 is handled by the plugin itself (capture phase, `preventDefault`), because the application reserves F5 and refuses it as a command default. The command `ui-reload.reload` is still registered in the shortcut catalog without a default, so the same action can be bound to another key in the shortcuts settings. Both paths share one 1.2 s cooldown and never fire twice.
 
@@ -15,10 +15,11 @@ A press does not always reload. Two kinds of failure leave the app on "应用无
 
 So a press:
 
-1. asks this plugin's own host half first;
+1. asks this plugin's own host half to replace every host plugin whose files changed on disk (next section);
 2. the host half reads the boot graph and, for every row whose **revision changed**, locates its bundle file and compiles it with `node:vm` (compile only, never run). A missing, unreadable or unparsable file means not ready;
-3. the browser half then sends one `HEAD` per bundle address in the graph, confirming the host still serves that revision;
-4. it navigates only when both pass; otherwise it waits 600 ms and asks again, up to eight times (about 5 s).
+3. a bundle written a moment ago is not trusted either: the same answer carries how long ago the youngest checked file was written, and a press waits until that is at least 700 ms;
+4. the browser half then sends one `HEAD` per bundle address in the graph, confirming the host still serves that revision;
+5. it navigates only when all of it passes; otherwise it waits 600 ms and asks again, up to eight times (about 5 s).
 
 When nothing passes it does not navigate: the current page stays, the button becomes pressable, its title says the plugin graph is not ready yet, the console gets a warning, and the host half records which plugin and which reason (`missing` / `unreadable` / `incomplete`). A failure costs an unresponsive press, not a dead app.
 
@@ -26,12 +27,29 @@ The page cannot answer this on its own: the desktop renderer is served a bootstr
 
 Confirming addresses uses `HEAD` because the aggregate bundle is tens of megabytes; compiling runs only for rows whose revision changed and skips files above 4 MB.
 
+## Host plugins too
+
+A document reload re-fetches every client bundle, but it cannot touch a plugin's host half: `lib/index.js` and `host/*.js` are modules the running process already occupies. So a press also asks the host half to do what the Plugin Manager does — compare every loaded module against the file it came from, evict the stale ones, stop the entries running them and restart those entries from the current files:
+
+```js
+await ctx.hmr.runExclusive(() => ctx.hmr.reconcileProfile([]))
+```
+
+Order matters: host plugins first, because a restarted plugin can move the client graph the document is about to load.
+
+This needs `@deepseek-ai/dsh-hmr`, which `dsh-base` enables whenever the launcher supplies `profileContext` — the desktop app does, headless and SDK hosts do not. Without it the press still reloads the page and records `host=unsupported` in the log; nothing breaks.
+
+The host returns how many files stayed pending, how many warnings the recomposition raised, and a `restartReason` when the change needs a real process restart (host dependencies moved). A `restartReason` means the page reloads but that part does not take effect until the app restarts.
+
+One caveat: this route is part of the host half, so the first release that adds it needs one restart before it can reload anything else.
+
 ## Requirements
 
 | | |
 |---|---|
 | DSH | `0.2.2-rc.1` (verified against it); `0.2.1-rc.2` also works |
 | `@deepseek-ai/cordis` | `~4.0.5` |
+| `@deepseek-ai/dsh-hmr` | enabled by `dsh-base` through `profileContext`; without it the press reloads only the page |
 | Mode | Web UI (`web` or `desktop` profile) — there is no CLI surface |
 
 Earlier DSH releases are untested. The button mounts into the slot `conversation.session.header.utilities`; a release that renames or removes that slot leaves it unrendered.
@@ -55,7 +73,7 @@ Manual install:
 
 ## Why a full reload and not HMR
 
-DSH already ships `dsh-client-hmr`, which republishes a plugin the moment its bundle changes. This button exists for the residue that path cannot reach — a page whose shell or bootstrap predates a change, or state that only a real document load clears. Reloading the document is the only thing that covers all of it.
+DSH already ships `dsh-client-hmr`, which republishes a plugin the moment its bundle changes. This button exists for the residue that path cannot reach — a page whose shell or bootstrap predates a change, or state that only a real document load clears. Reloading the document is the only thing that covers all of it on the client side; the host side is covered by the reconciliation described in the previous section.
 
 **What survives a click:** conversation, workspace and connection state — they live on the host.
 
@@ -65,11 +83,17 @@ DSH already ships `dsh-client-hmr`, which republishes a plugin the moment its bu
 
 The package has two halves and the bundle patch mounts both:
 
-- `lib/index.js` — the host half. It exports an empty `apply()` and registers no route, service or watcher, because a plain page reload needs nothing from the host. It exists only so the bundle row has something to mount; dropping it would stop the package from being composed at all, taking the client button with it.
+- `lib/index.js` — the host half. It mounts three routes on the web server: the page log, the host plugin reload (through `ctx.hmr`) and the readiness check. The readiness route exists because the page has no filesystem, so it cannot answer for the files a new document would load.
 - `lib/client.js` — the browser half, injected through `dsh.client.inject: ["@deepseek-ai/dsh-client-ui-slots"]`. It registers the button into `conversation.session.header.utilities` and F5 as the `ui-reload.reload` command; both call the same `pressReload()`. A click first verifies the target document's boot graph (previous section) and then enters it with `location.replace()`; when nothing is servable it stays on the current page instead of booting a document that cannot come up.
 
 ## Changelog
 
+### 0.3.0
+
+- a press now reloads host plugins first: the host half asks `ctx.hmr` to reconcile the profile, which evicts every loaded module whose file changed on disk and restarts its entry, so `lib/index.js` and `host/*.js` edits no longer need a process restart
+- the readiness answer now carries `quietMs`, the age of the youngest checked bundle; a press waits until a changed bundle is at least 700 ms old, closing the window where the bytes that compiled are not the bytes that load
+- the log records the host reload outcome (`done` / `unsupported` / `failed`, plus `pending` and `restartReason`) before the page reload
+- `README`: the host half no longer described as an empty `apply()`
 ### 0.2.2
 
 - F5 is registered as the keyboard command `ui-reload.reload`, sharing the same verify-then-reload press as the button and rebindable in the shortcuts settings
