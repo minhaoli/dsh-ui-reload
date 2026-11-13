@@ -4,19 +4,27 @@ A "reload the whole frontend" button in the DSH conversation session header, imm
 
 Clicking it reloads the entire page — the one operation that reliably picks up anything the frontend can be out of sync with: client plugin bundles rebuilt under the running page, plugin-list changes, stale CSS, and the shell's own code.
 
+The button and **F5** are the same press. F5 is handled by the plugin itself (capture phase, `preventDefault`), because the application reserves F5 and refuses it as a command default. The command `ui-reload.reload` is still registered in the shortcut catalog without a default, so the same action can be bound to another key in the shortcuts settings. Both paths share one 1.2 s cooldown and never fire twice.
+
 ## A press lands on a servable graph
 
-The moment a plugin bundle changes, `dsh-client-hmr` recomputes that bundle's revision from the bytes on disk and republishes it. The document the page is holding still names the previous revision, those `plugins/??…&rev=<old>` addresses stop resolving, and the loader — after failing both the per-plugin bundle and the aggregate one — throws. The app then sits on "应用无法启动或已意外停止" until the process restarts.
+A press does not always reload. Two kinds of failure leave the app on "应用无法启动或已意外停止" with only a process restart as the way out:
 
-So a press no longer calls `reload()` directly:
+- after a plugin bundle changes, `dsh-client-hmr` recomputes its revision from the bytes on disk, while the boot graph the page holds still names the previous one — the host no longer serves those addresses;
+- more often: a build is writing a bundle file at the exact moment the page reloads. The file exists and answers 200, but it is half a file, so executing it throws and the boot audit reports "an entry did not activate".
 
-1. it takes a document address with a fresh query and reads back the document the host would actually serve;
-2. it reads the boot graph out of the injected `globalThis["__DSH_BOOT__"]` and sends one `HEAD` per bundle address in it;
-3. it navigates only when every address resolves; otherwise it waits 600 ms, reads the document again, and retries — up to 8 readings (about 5 s).
+So a press:
 
-When no reading is servable the press does not navigate: the current page stays, the button becomes pressable again, and its title says the plugin graph is not ready yet. When the document itself cannot be read (a protocol-level failure), it falls back to the old reload.
+1. asks this plugin's own host half first;
+2. the host half reads the boot graph and, for every row whose **revision changed**, locates its bundle file and compiles it with `node:vm` (compile only, never run). A missing, unreadable or unparsable file means not ready;
+3. the browser half then sends one `HEAD` per bundle address in the graph, confirming the host still serves that revision;
+4. it navigates only when both pass; otherwise it waits 600 ms and asks again, up to eight times (about 5 s).
 
-The probes are `HEAD` requests because the aggregate bundle is tens of megabytes and the route answers a HEAD from immutable headers without materialising the body.
+When nothing passes it does not navigate: the current page stays, the button becomes pressable, its title says the plugin graph is not ready yet, the console gets a warning, and the host half records which plugin and which reason (`missing` / `unreadable` / `incomplete`). A failure costs an unresponsive press, not a dead app.
+
+The page cannot answer this on its own: the desktop renderer is served a bootstrap document whose body carries no boot graph, so `fetch(location.href)` returns only that shell. That is exactly why the 0.2.1 pre-flight was inert — it never found a graph and silently fell back to a plain reload.
+
+Confirming addresses uses `HEAD` because the aggregate bundle is tens of megabytes; compiling runs only for rows whose revision changed and skips files above 4 MB.
 
 ## Requirements
 
@@ -58,9 +66,18 @@ DSH already ships `dsh-client-hmr`, which republishes a plugin the moment its bu
 The package has two halves and the bundle patch mounts both:
 
 - `lib/index.js` — the host half. It exports an empty `apply()` and registers no route, service or watcher, because a plain page reload needs nothing from the host. It exists only so the bundle row has something to mount; dropping it would stop the package from being composed at all, taking the client button with it.
-- `lib/client.js` — the browser half, injected through `dsh.client.inject: ["@deepseek-ai/dsh-client-ui-slots"]`. It registers the button into `conversation.session.header.utilities`. A click first verifies the target document's boot graph (previous section) and then enters it with `location.replace()`; when nothing is servable it stays on the current page instead of booting a document that cannot come up.
+- `lib/client.js` — the browser half, injected through `dsh.client.inject: ["@deepseek-ai/dsh-client-ui-slots"]`. It registers the button into `conversation.session.header.utilities` and F5 as the `ui-reload.reload` command; both call the same `pressReload()`. A click first verifies the target document's boot graph (previous section) and then enters it with `location.replace()`; when nothing is servable it stays on the current page instead of booting a document that cannot come up.
 
 ## Changelog
+
+### 0.2.2
+
+- F5 is registered as the keyboard command `ui-reload.reload`, sharing the same verify-then-reload press as the button and rebindable in the shortcuts settings
+
+- readiness is answered by the plugin's own host half: it reads the boot graph and compiles the bundle file of every row whose revision changed (`node:vm`, compile only); missing, unreadable or unparsable counts as not ready
+- the browser half asks the host first, then `HEAD`s every bundle address; it navigates only when both pass
+- fixes the 0.2.1 dead path: the desktop renderer is served a bootstrap document without `__DSH_BOOT__`, so reading its own document always returned null and the pre-flight quietly degraded to a plain reload
+- a refused press keeps the current page and says so in the button title; the host half records which plugin and why
 
 ### 0.2.1
 
