@@ -16,16 +16,26 @@ A press does not always reload. Two kinds of failure leave the app on "应用无
 So a press:
 
 1. asks this plugin's own host half to replace every host plugin whose files changed on disk (next section);
-2. the host half reads the boot graph and, for every row whose **revision changed**, locates its bundle file and compiles it with `node:vm` (compile only, never run). A missing, unreadable or unparsable file means not ready;
+2. the host half reads the boot graph and, for **every batch the document will actually load**, takes the bytes the host serves and compiles them with `node:vm` (compile only, never run). A batch that is not a complete script means not ready; when one fails, the plugins inside it are republished once (mtime moved, entry re-read), the graph is read again and its *new* batch addresses are compiled;
 3. a bundle written a moment ago is not trusted either: the same answer carries how long ago the youngest checked file was written, and a press waits until that is at least 700 ms;
-4. the browser half then sends one `HEAD` per bundle address in the graph, confirming the host still serves that revision;
+4. the browser half then sends one `HEAD` per batch address in the graph, confirming the host still serves that revision;
 5. it navigates only when all of it passes; otherwise it waits 600 ms and asks again, up to eight times (about 5 s).
 
-When nothing passes it does not navigate: the current page stays, the button becomes pressable, its title says the plugin graph is not ready yet, the console gets a warning, and the host half records which plugin and which reason (`missing` / `unreadable` / `incomplete`). A failure costs an unresponsive press, not a dead app.
+When nothing passes it does not navigate: the current page stays, the button becomes pressable, its title says the plugin graph is not ready yet, the console gets a warning, and the host half records which batch and which reason (`incomplete-as-served` / `served-unavailable` / `batch-too-large` / `no-batches`, named `batch:<phase>:<rev>`). A failure costs an unresponsive press, not a dead app.
 
 The page cannot answer this on its own: the desktop renderer is served a bootstrap document whose body carries no boot graph, so `fetch(location.href)` returns only that shell. That is exactly why the 0.2.1 pre-flight was inert — it never found a graph and silently fell back to a plain reload.
 
-Confirming addresses uses `HEAD` because the aggregate bundle is tens of megabytes; compiling runs only for rows whose revision changed and skips files above 4 MB.
+### What the pre-flight compiles
+
+The page does not load each plugin bundle. `dsh-client-modules` groups every bundle into a few **combo batches** and `bootInjections()` puts one `<script src>` (bootstrap) or `<link rel=preload>` (application) per batch into the document — the per-plugin address exists, but the document never requests it. A batch is built by concatenating its members and terminating each with `;\n`, so the script that runs is not any one member.
+
+That matters because compiling each member alone does not predict the batch: two bundles that each compile can still collide once they share one script's top-level scope (`Identifier 'resumePage' has already been declared`). So 0.3.2 compiles `graph.batches[].url` — the same object the document fetches — and 0.3.1's per-row pass is kept only to name and republish the member of a batch that failed.
+
+On a 106-entry profile that is three batches: 0.04 MB, 6.76 MB and **33.67 MB**. Compiling the largest costs about **340 ms** and roughly **150 MB of heap** while the parse is live; compiling the same bytes again is free because Node caches the compiled script. So the gate compiles each batch once per revision and remembers the verdict: a batch revision is a hash over the ordered `(id, rev)` list and the registry serves one body per published revision, so a revision that compiled once cannot come back with different bytes. Failures are never remembered — a torn body is exactly what must be recompiled after a republish.
+
+The old 4 MB ceiling was the hole: the two big batches exceeded it and were waved through as "too large to verify", which is 90% of the bytes the page executes. The ceiling is now 64 MB, and a batch above it is **held** (`batch-too-large`) rather than passed — an unverified batch is not a promise.
+
+Address confirmation in the browser half still uses `HEAD`, since the pre-flight has already read the bodies.
 
 ## Host plugins too
 
@@ -86,7 +96,31 @@ The package has two halves and the bundle patch mounts both:
 - `lib/index.js` — the host half. It mounts three routes on the web server: the page log, the host plugin reload (through `ctx.hmr`) and the readiness check. The readiness route exists because the page has no filesystem, so it cannot answer for the files a new document would load.
 - `lib/client.js` — the browser half, injected through `dsh.client.inject: ["@deepseek-ai/dsh-client-ui-slots"]`. It registers the button into `conversation.session.header.utilities` and F5 as the `ui-reload.reload` command; both call the same `pressReload()`. A click first verifies the target document's boot graph (previous section) and then enters it with `location.replace()`; when nothing is servable it stays on the current page instead of booting a document that cannot come up.
 
+### A revision is a file key, not the bytes
+
+`dsh-client-modules` takes each client bundle once, when it publishes that entry: it reads the file into a buffer, and derives the address the page will use from that file's `mtime`, `ctime` and `size`. The revision describes a file, never a body — so a build writing the file during that read can leave the buffer holding half a script while the revision already matches the finished file.
+
+Nothing repairs it afterwards. Asking `rebuilt(id)` recomputes the same key, concludes nothing changed and returns without re-reading; `dsh-client-hmr` polls that key every 500 ms, calls `rebuilt`, and then resets its own baseline to the live stat, so the change it just noticed is dropped. A process restart rebuilds the registry from disk, which is why restarting always works — and why a press had to stop trusting revisions.
+
+So a press verifies the batch scripts the document would actually execute. When one is not a complete script, the host half walks the bundles inside it, moves the offending file's `mtime` to now — the timestamp only, the contents are never rewritten — asks the registry to republish that entry, then reads the graph again and compiles its new batch addresses. A batch that still fails is held back and logged as `batch:<phase>:<rev>`, so the page stays put instead of entering a document that cannot come up. Nothing falls back to reading the disk: a file that looks fine while the served bytes are unavailable is reported as exactly that and held, not passed.
+
 ## Changelog
+
+### 0.3.2
+
+- the pre-flight now compiles the **combo batches** the document actually loads (`graph.batches[].url`), not each plugin's own address: the per-plugin address is never requested by the document, and its bytes compiling says nothing about the concatenated script that runs
+- a batch that does not compile holds the press with `batch:<phase>:<rev>`; the bundles inside it are republished first, and the graph is read again so the verdict is taken on the *new* addresses rather than the ones that just failed
+- the 4 MB compile ceiling that silently passed the 6.76 MB and 33.67 MB batches is gone: the ceiling is 64 MB with the measured cost (about 340 ms and 150 MB of heap for the largest batch), and anything above it is held as `batch-too-large` instead of passed
+- a clean batch revision is remembered, so the 340 ms parse is paid once per change rather than on every press; failures are never remembered
+- per-row checking is kept, but only to name and republish the member of a failed batch, which also cuts a press from 106 compile-checks to 3
+- a graph advertising no batches is held as `no-batches` rather than passed unverified
+
+### 0.3.1
+
+- a press verifies the bytes the host would serve for every row, every press; the skip for a row whose revision still matched the one this page booted with is gone, because that revision is exactly what could be wrong
+- a bundle that does not compile as served is republished instead of only being refused: the file's `mtime` is moved (contents untouched), the registry re-reads it, and the new address is verified
+- a bundle the host cannot serve is held and reported as `served-unavailable` instead of being silently compared against the file on disk
+- the readiness answer carries what a press repaired (`repaired`), and the log records one `republished: <id> -> <rev>` line per entry
 
 ### 0.3.0
 
